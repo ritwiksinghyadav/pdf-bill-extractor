@@ -160,45 +160,220 @@ function extractInfo(text, fileName) {
   return { customerName, customerNumber, billNo, date, amount, confidence };
 }
 
-// ─── IPC: Extract Data from PDFs ────────────────────────────────────────────
-ipcMain.handle('pdf:extractData', async (_, filePaths) => {
-  const results = [];
+// ─── Local Storage & Settings Handlers ─────────────────────────────────────
+const getSettingsPath = () => path.join(app.getPath('userData'), 'pdf_extractor_config.json');
+const getHistoryPath = () => path.join(app.getPath('userData'), 'pdf_extractor_history.json');
 
-  for (const filePath of filePaths) {
-    const fileName = path.basename(filePath);
-    try {
-      const buffer = fs.readFileSync(filePath);
-      const pdfData = await pdfParse(buffer);
-      const extracted = extractInfo(pdfData.text, fileName);
-
-      results.push({
-        path: filePath,
-        pdfName: fileName,
-        customerName: extracted.customerName,
-        customerNumber: extracted.customerNumber,
-        billNo: extracted.billNo,
-        date: extracted.date,
-        amount: extracted.amount,
-        confidence: extracted.confidence,
-        pages: pdfData.numpages,
-        status: 'Success',
-      });
-    } catch (err) {
-      results.push({
-        path: filePath,
-        pdfName: fileName,
-        customerName: '—',
-        customerNumber: '—',
-        billNo: '—',
-        date: '—',
-        amount: '—',
-        confidence: 'None',
-        pages: 0,
-        status: 'Error',
-        error: err.message,
-      });
+ipcMain.handle('storage:getSettings', async () => {
+  try {
+    const p = getSettingsPath();
+    if (fs.existsSync(p)) {
+      return JSON.parse(fs.readFileSync(p, 'utf8'));
     }
+  } catch (err) {
+    console.error('Error reading settings:', err);
   }
-
-  return results;
+  return {
+    uploadthingToken: '',
+    aisensyApiKey: '',
+    aisensyCampaignName: '',
+    countryCode: '91',
+  };
 });
+
+ipcMain.handle('storage:saveSettings', async (_, settings) => {
+  try {
+    fs.writeFileSync(getSettingsPath(), JSON.stringify(settings, null, 2), 'utf8');
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('storage:getHistory', async () => {
+  try {
+    const p = getHistoryPath();
+    if (fs.existsSync(p)) {
+      return JSON.parse(fs.readFileSync(p, 'utf8'));
+    }
+  } catch (err) {
+    console.error('Error reading history:', err);
+  }
+  return { lastProcessedPath: null, records: {} };
+});
+
+ipcMain.handle('storage:saveHistory', async (_, history) => {
+  try {
+    fs.writeFileSync(getHistoryPath(), JSON.stringify(history, null, 2), 'utf8');
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('storage:clearHistory', async () => {
+  try {
+    const p = getHistoryPath();
+    if (fs.existsSync(p)) {
+      fs.unlinkSync(p);
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── Uploadthing Public PDF Upload Handler ───────────────────────────────────
+ipcMain.handle('uploadthing:uploadFile', async (_, { filePath, uploadthingToken }) => {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { success: false, error: 'File does not exist' };
+    }
+
+    const fileName = path.basename(filePath);
+    const fileBuffer = fs.readFileSync(filePath);
+    const fileSize = fileBuffer.length;
+
+    // 1. If Uploadthing API Token is provided, call Uploadthing API v6
+    if (uploadthingToken && uploadthingToken.trim()) {
+      const apiKey = uploadthingToken.trim();
+      const initRes = await fetch('https://api.uploadthing.com/v6/uploadFiles', {
+        method: 'POST',
+        headers: {
+          'x-uploadthing-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          files: [
+            {
+              name: fileName,
+              size: fileSize,
+              type: 'application/pdf',
+            },
+          ],
+        }),
+      });
+
+      if (!initRes.ok) {
+        const errText = await initRes.text();
+        throw new Error(`Uploadthing auth/init failed (${initRes.status}): ${errText}`);
+      }
+
+      const initData = await initRes.json();
+      const fileConfig = Array.isArray(initData) ? initData[0] : initData?.data?.[0];
+
+      if (!fileConfig || !fileConfig.uploadUrl) {
+        throw new Error('Uploadthing did not return a valid upload URL');
+      }
+
+      // Upload file payload using FormData or direct POST
+      const formData = new FormData();
+      if (fileConfig.fields) {
+        for (const [key, value] of Object.entries(fileConfig.fields)) {
+          formData.append(key, value);
+        }
+      }
+      const blob = new Blob([fileBuffer], { type: 'application/pdf' });
+      formData.append('file', blob, fileName);
+
+      const uploadRes = await fetch(fileConfig.uploadUrl, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!uploadRes.ok) {
+        const upErr = await uploadRes.text();
+        throw new Error(`Uploading file content failed (${uploadRes.status}): ${upErr}`);
+      }
+
+      const publicUrl = fileConfig.fileUrl || `https://utfs.io/f/${fileConfig.fileKey || fileConfig.key}`;
+      return { success: true, publicUrl, provider: 'Uploadthing' };
+    }
+
+    // 2. Zero-config fallback upload to tmpfiles.org for instant testing
+    const formData = new FormData();
+    const blob = new Blob([fileBuffer], { type: 'application/pdf' });
+    formData.append('file', blob, fileName);
+
+    const fallbackRes = await fetch('https://tmpfiles.org/api/v1/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (fallbackRes.ok) {
+      const fbData = await fallbackRes.json();
+      if (fbData.status === 'success' && fbData.data?.url) {
+        // Direct download URL modification for tmpfiles.org
+        const dlUrl = fbData.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+        return { success: true, publicUrl: dlUrl, provider: 'tmpfiles.org (Fallback)' };
+      }
+    }
+
+    throw new Error('Please configure your Uploadthing API token in Settings.');
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── AiSensy WhatsApp API Handler ──────────────────────────────────────────
+ipcMain.handle('aisensy:sendMessage', async (_, { apiKey, campaignName, destination, customerName, billNo, amount, pdfUrl, countryCode }) => {
+  try {
+    if (!apiKey || !apiKey.trim()) {
+      return { success: false, error: 'AiSensy API Key is missing. Please configure it in Settings.' };
+    }
+    if (!campaignName || !campaignName.trim()) {
+      return { success: false, error: 'AiSensy Campaign Name is missing. Please configure it in Settings.' };
+    }
+
+    // Clean destination phone number
+    let cleanNumber = String(destination || '').replace(/[^\d]/g, '');
+    const cc = String(countryCode || '91').replace(/[^\d]/g, '');
+    
+    // Add country code if 10-digit number
+    if (cleanNumber.length === 10) {
+      cleanNumber = cc + cleanNumber;
+    }
+    if (!cleanNumber.startsWith('+')) {
+      cleanNumber = '+' + cleanNumber;
+    }
+
+    const payload = {
+      apiKey: apiKey.trim(),
+      campaignName: campaignName.trim(),
+      destination: cleanNumber,
+      userName: customerName || 'Customer',
+      templateParams: [
+        customerName || 'Customer',
+        billNo || 'N/A',
+        amount || 'N/A',
+        pdfUrl || '',
+      ],
+      media: pdfUrl ? {
+        url: pdfUrl,
+        filename: `${customerName || 'Bill'}_${billNo || 'Invoice'}.pdf`,
+      } : undefined,
+    };
+
+    const res = await fetch('https://backend.aisensy.com/campaign/t1/api/v2', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+    if (res.ok && (data.success === true || data.status === 'success' || data.messageId || data.result)) {
+      return { success: true, response: data };
+    } else {
+      return {
+        success: false,
+        error: data.message || data.error || data.reason || `AiSensy API Error (${res.status})`,
+        response: data,
+      };
+    }
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
