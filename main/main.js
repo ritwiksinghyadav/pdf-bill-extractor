@@ -266,97 +266,43 @@ ipcMain.handle('storage:clearHistory', async () => {
   }
 });
 
-// ─── Uploadthing Public PDF Upload Handler ───────────────────────────────────
+// ─── Uploadthing PDF Upload Handler (UTApi - server-side) ────────────────────
 ipcMain.handle('uploadthing:uploadFile', async (_, { filePath, uploadthingToken }) => {
   try {
     if (!fs.existsSync(filePath)) {
-      return { success: false, error: 'File does not exist' };
+      return { success: false, error: 'File does not exist: ' + filePath };
+    }
+    if (!uploadthingToken || !uploadthingToken.trim()) {
+      return { success: false, error: 'No Uploadthing token configured.' };
     }
 
     const fileName = path.basename(filePath);
     const fileBuffer = fs.readFileSync(filePath);
-    const fileSize = fileBuffer.length;
 
-    // 1. If Uploadthing API Token is provided, call Uploadthing API v6
-    if (uploadthingToken && uploadthingToken.trim()) {
-      const apiKey = uploadthingToken.trim();
-      const initRes = await fetch('https://api.uploadthing.com/v6/uploadFiles', {
-        method: 'POST',
-        headers: {
-          'x-uploadthing-api-key': apiKey,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          files: [
-            {
-              name: fileName,
-              size: fileSize,
-              type: 'application/pdf',
-            },
-          ],
-        }),
-      });
+    // Use UTApi from the uploadthing package (correct server-side upload)
+    const { UTApi } = require('uploadthing/server');
+    const utapi = new UTApi({ token: uploadthingToken.trim() });
 
-      if (!initRes.ok) {
-        const errText = await initRes.text();
-        throw new Error(`Uploadthing auth/init failed (${initRes.status}): ${errText}`);
-      }
+    // Wrap buffer as a File object (supported in Node 20+ and Electron)
+    const file = new File([fileBuffer], fileName, { type: 'application/pdf' });
 
-      const initData = await initRes.json();
-      const fileConfig = Array.isArray(initData) ? initData[0] : initData?.data?.[0];
+    const response = await utapi.uploadFiles(file);
 
-      if (!fileConfig || !fileConfig.uploadUrl) {
-        throw new Error('Uploadthing did not return a valid upload URL');
-      }
-
-      // Upload file payload using FormData or direct POST
-      const formData = new FormData();
-      if (fileConfig.fields) {
-        for (const [key, value] of Object.entries(fileConfig.fields)) {
-          formData.append(key, value);
-        }
-      }
-      const blob = new Blob([fileBuffer], { type: 'application/pdf' });
-      formData.append('file', blob, fileName);
-
-      const uploadRes = await fetch(fileConfig.uploadUrl, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!uploadRes.ok) {
-        const upErr = await uploadRes.text();
-        throw new Error(`Uploading file content failed (${uploadRes.status}): ${upErr}`);
-      }
-
-      const publicUrl = fileConfig.fileUrl || `https://utfs.io/f/${fileConfig.fileKey || fileConfig.key}`;
-      return { success: true, publicUrl, provider: 'Uploadthing' };
+    if (response.error) {
+      return { success: false, error: response.error.message || 'Uploadthing upload failed' };
     }
 
-    // 2. Zero-config fallback upload to tmpfiles.org for instant testing
-    const formData = new FormData();
-    const blob = new Blob([fileBuffer], { type: 'application/pdf' });
-    formData.append('file', blob, fileName);
-
-    const fallbackRes = await fetch('https://tmpfiles.org/api/v1/upload', {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (fallbackRes.ok) {
-      const fbData = await fallbackRes.json();
-      if (fbData.status === 'success' && fbData.data?.url) {
-        // Direct download URL modification for tmpfiles.org
-        const dlUrl = fbData.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
-        return { success: true, publicUrl: dlUrl, provider: 'tmpfiles.org (Fallback)' };
-      }
+    const publicUrl = response.data?.ufsUrl || response.data?.url;
+    if (!publicUrl) {
+      return { success: false, error: 'Uploadthing returned no URL. Check your token and app settings.' };
     }
 
-    throw new Error('Please configure your Uploadthing API token in Settings.');
+    return { success: true, publicUrl, provider: 'Uploadthing' };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
+
 
 // ─── AiSensy WhatsApp API Handler ──────────────────────────────────────────
 ipcMain.handle('aisensy:sendMessage', async (_, { apiKey, campaignName, destination, customerName, billNo, amount, pdfUrl, countryCode }) => {
