@@ -137,6 +137,29 @@ export default function Home() {
 
     const fileName = pdfFiles.find(f => f.path === filePath)?.name || filePath.split('\\').pop() || 'Bill.pdf';
 
+    // ── Gate 0: Uploadthing token must be configured before we even start ──
+    if (!settings.uploadthingToken || !settings.uploadthingToken.trim()) {
+      const errRecord: RecordData = {
+        path: filePath,
+        pdfName: fileName,
+        customerName: '—',
+        customerNumber: '—',
+        billNo: '—',
+        date: '—',
+        amount: '—',
+        confidence: 'None',
+        pages: 0,
+        status: 'Error',
+        uploadStatus: 'Error',
+        whatsappStatus: 'Idle',
+        error: '⚠️ Uploadthing token is not configured. Open ⚙️ Settings and add your token first.',
+        processedAt: new Date().toLocaleTimeString(),
+      };
+      const updated = { ...currentRecords, [filePath]: errRecord };
+      setRecords(updated);
+      return updated;
+    }
+
     // Step 1: Extract PDF Data
     const extractedList = await window.electronAPI.extractPdfData([filePath]);
     const extracted = extractedList[0];
@@ -165,6 +188,28 @@ export default function Home() {
       return updated;
     }
 
+    // ── Gate 1: Phone number must be found in the PDF — stop immediately if missing ──
+    const noPhone =
+      !extracted.customerNumber ||
+      extracted.customerNumber === 'Not Found' ||
+      extracted.customerNumber === '—';
+
+    if (noPhone) {
+      const errRecord: RecordData = {
+        ...extracted,
+        status: 'Error',
+        uploadStatus: 'Idle',
+        whatsappStatus: 'Idle',
+        error: `📵 No phone number found in this PDF. Skipping — please check the bill manually.`,
+        processedAt: new Date().toLocaleTimeString(),
+      };
+      const updated = { ...currentRecords, [filePath]: errRecord };
+      setRecords(updated);
+      setLastProcessedPath(filePath);
+      await window.electronAPI.saveHistory({ lastProcessedPath: filePath, records: updated });
+      return updated;
+    }
+
     // Update state to extracted & uploading
     let activeRecord: RecordData = {
       ...extracted,
@@ -175,7 +220,7 @@ export default function Home() {
     let updatedRecords = { ...currentRecords, [filePath]: activeRecord };
     setRecords(updatedRecords);
 
-    // Step 2: Upload to Uploadthing / Fallback
+    // Step 2: Upload to Uploadthing
     const uploadRes = await window.electronAPI.uploadthingUpload({
       filePath,
       uploadthingToken: settings.uploadthingToken,
@@ -193,32 +238,46 @@ export default function Home() {
 
     activeRecord.publicUrl = uploadRes.publicUrl;
     activeRecord.uploadStatus = 'Uploaded';
+    updatedRecords = { ...currentRecords, [filePath]: activeRecord };
+    setRecords(updatedRecords);
+
+    // ── Gate 2: Only send WhatsApp if AiSensy is configured ──
+    const aisensyConfigured =
+      settings.aisensyApiKey?.trim() &&
+      settings.aisensyCampaignName?.trim();
+
+    if (!aisensyConfigured) {
+      // Upload done, but WhatsApp is skipped — let the user know
+      activeRecord.whatsappStatus = 'Idle';
+      activeRecord.error = '⚠️ AiSensy API key or Campaign Name is not configured. WhatsApp not sent. Open ⚙️ Settings to add them.';
+      updatedRecords = { ...currentRecords, [filePath]: activeRecord };
+      setRecords(updatedRecords);
+      setLastProcessedPath(filePath);
+      await window.electronAPI.saveHistory({ lastProcessedPath: filePath, records: updatedRecords });
+      return updatedRecords;
+    }
+
+    // Step 3: Send WhatsApp via AiSensy
     activeRecord.whatsappStatus = 'Sending';
     updatedRecords = { ...currentRecords, [filePath]: activeRecord };
     setRecords(updatedRecords);
 
-    // Step 3: Send WhatsApp Message via AiSensy API
-    if (activeRecord.customerNumber !== 'Not Found' && activeRecord.customerNumber !== '—') {
-      const waRes = await window.electronAPI.aisensySend({
-        apiKey: settings.aisensyApiKey,
-        campaignName: settings.aisensyCampaignName,
-        destination: activeRecord.customerNumber,
-        customerName: activeRecord.customerName,
-        billNo: activeRecord.billNo,
-        amount: activeRecord.amount,
-        pdfUrl: activeRecord.publicUrl,
-        countryCode: settings.countryCode,
-      });
+    const waRes = await window.electronAPI.aisensySend({
+      apiKey: settings.aisensyApiKey,
+      campaignName: settings.aisensyCampaignName,
+      destination: activeRecord.customerNumber,
+      customerName: activeRecord.customerName,
+      billNo: activeRecord.billNo,
+      amount: activeRecord.amount,
+      pdfUrl: activeRecord.publicUrl!,
+      countryCode: settings.countryCode,
+    });
 
-      if (waRes.success) {
-        activeRecord.whatsappStatus = 'Sent';
-      } else {
-        activeRecord.whatsappStatus = 'Error';
-        activeRecord.error = waRes.error || 'WhatsApp delivery failed';
-      }
+    if (waRes.success) {
+      activeRecord.whatsappStatus = 'Sent';
     } else {
       activeRecord.whatsappStatus = 'Error';
-      activeRecord.error = 'Customer Mobile Number not found in PDF';
+      activeRecord.error = waRes.error || 'WhatsApp delivery failed';
     }
 
     // Step 4: Save State & History
