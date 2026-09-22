@@ -279,9 +279,25 @@ ipcMain.handle('uploadthing:uploadFile', async (_, { filePath, uploadthingToken 
     const fileName = path.basename(filePath);
     const fileBuffer = fs.readFileSync(filePath);
 
+    let cleanToken = uploadthingToken.trim();
+    // Auto-strip environment variable syntax if copied directly from dashboard
+    if (cleanToken.startsWith('UPLOADTHING_TOKEN=')) {
+      cleanToken = cleanToken.replace(/^UPLOADTHING_TOKEN=/, '').trim();
+    }
+    // Remove surrounding single or double quotes
+    cleanToken = cleanToken.replace(/^['"]|['"]$/g, '').trim();
+
+    // Check if user accidentally pasted a legacy secret key
+    if (cleanToken.startsWith('sk_live_')) {
+      return {
+        success: false,
+        error: 'You pasted a Legacy Secret Key (starts with sk_live_). Please click the "SDK v7+" tab on UploadThing and copy the UPLOADTHING_TOKEN (starts with eyJhc...).'
+      };
+    }
+
     // Use UTApi from the uploadthing package (correct server-side upload)
     const { UTApi } = require('uploadthing/server');
-    const utapi = new UTApi({ token: uploadthingToken.trim() });
+    const utapi = new UTApi({ token: cleanToken });
 
     // Wrap buffer as a File object (supported in Node 20+ and Electron)
     const file = new File([fileBuffer], fileName, { type: 'application/pdf' });

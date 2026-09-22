@@ -61,19 +61,26 @@ export default function SettingsModal({ isOpen, onClose, settings, onSave }: Set
           <div className="space-y-2">
             <label className="flex items-center justify-between text-xs font-semibold text-[#37352f]">
               <span className="flex items-center gap-1.5">
-                <Upload size={14} className="text-[#2383e2]" /> Uploadthing Secret Token
+                <Upload size={14} className="text-[#2383e2]" /> UploadThing Token (SDK v7+)
               </span>
               <span className="text-[10px] text-[#9b9a97] font-normal">Public PDF Links</span>
             </label>
             <input
               type="password"
-              placeholder="sk_live_..."
+              placeholder="eyJhcG1..."
               value={form.uploadthingToken}
-              onChange={(e) => setForm({ ...form, uploadthingToken: e.target.value })}
+              onChange={(e) => {
+                let val = e.target.value.trim();
+                if (val.startsWith('UPLOADTHING_TOKEN=')) {
+                  val = val.replace(/^UPLOADTHING_TOKEN=/, '').trim();
+                }
+                val = val.replace(/^['"]|['"]$/g, '').trim();
+                setForm({ ...form, uploadthingToken: val });
+              }}
               className="w-full px-3 py-2 text-xs rounded-md border border-[#e9e9e7] bg-[#fafaf9] focus:bg-white focus:border-[#2383e2] outline-none font-mono"
             />
             <p className="text-[11px] text-[#9b9a97]">
-              Used to upload bill PDFs & generate public URLs (<code className="font-mono bg-[#f0efe9] px-1 rounded">utfs.io</code>).
+              Copy from the <span className="font-semibold text-[#37352f]">SDK v7+</span> tab on UploadThing (starts with <code className="font-mono bg-[#f0efe9] px-1 rounded">eyJ...</code>).
             </p>
           </div>
 
