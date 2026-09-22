@@ -160,6 +160,49 @@ function extractInfo(text, fileName) {
   return { customerName, customerNumber, billNo, date, amount, confidence };
 }
 
+// ─── IPC: Extract Data from PDFs ────────────────────────────────────────────
+ipcMain.handle('pdf:extractData', async (_, filePaths) => {
+  const results = [];
+
+  for (const filePath of filePaths) {
+    const fileName = path.basename(filePath);
+    try {
+      const buffer = fs.readFileSync(filePath);
+      const pdfData = await pdfParse(buffer);
+      const extracted = extractInfo(pdfData.text, fileName);
+
+      results.push({
+        path: filePath,
+        pdfName: fileName,
+        customerName: extracted.customerName,
+        customerNumber: extracted.customerNumber,
+        billNo: extracted.billNo,
+        date: extracted.date,
+        amount: extracted.amount,
+        confidence: extracted.confidence,
+        pages: pdfData.numpages,
+        status: 'Success',
+      });
+    } catch (err) {
+      results.push({
+        path: filePath,
+        pdfName: fileName,
+        customerName: '—',
+        customerNumber: '—',
+        billNo: '—',
+        date: '—',
+        amount: '—',
+        confidence: 'None',
+        pages: 0,
+        status: 'Error',
+        error: err.message,
+      });
+    }
+  }
+
+  return results;
+});
+
 // ─── Local Storage & Settings Handlers ─────────────────────────────────────
 const getSettingsPath = () => path.join(app.getPath('userData'), 'pdf_extractor_config.json');
 const getHistoryPath = () => path.join(app.getPath('userData'), 'pdf_extractor_history.json');
