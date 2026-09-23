@@ -14,6 +14,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Services
   uploadthingUpload: (params)    => ipcRenderer.invoke('uploadthing:uploadFile', params),
+  testUploadthingToken: (token)  => ipcRenderer.invoke('uploadthing:testToken', token),
   aisensySend:       (params)    => ipcRenderer.invoke('aisensy:sendMessage', params),
+  testAiSensyKey:    (params)    => ipcRenderer.invoke('aisensy:testKey', params),
+
+  // Daily Logging
+  getTodayLogs:      ()          => ipcRenderer.invoke('logs:getToday'),
+  openLogsFolder:    ()          => ipcRenderer.invoke('logs:openFolder'),
 });
+
 
