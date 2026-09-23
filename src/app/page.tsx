@@ -108,6 +108,9 @@ export default function Home() {
     setTimeout(() => setToastMessage(null), 4000);
   };
 
+  // Auto-updater state
+  const [downloadedUpdate, setDownloadedUpdate] = useState<{ version: string } | null>(null);
+
   // Load settings & cache history on mount
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -122,6 +125,15 @@ export default function Home() {
     });
     window.electronAPI.getHistory().then((h) => {
       if (h && h.records) setCacheHistory(h);
+    });
+
+    // Listen for background auto-updates
+    window.electronAPI.onUpdateAvailable?.((info) => {
+      showToast(`New update (v${info.version}) downloading in background...`, 'success');
+    });
+
+    window.electronAPI.onUpdateDownloaded?.((info) => {
+      setDownloadedUpdate(info);
     });
   }, []);
 
@@ -1312,6 +1324,23 @@ export default function Home() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Update Ready Banner */}
+      {downloadedUpdate && (
+        <div className="fixed top-4 right-5 z-50 px-4 py-2.5 rounded-lg shadow-xl border bg-[#edf6ed] border-[#c3e6cb] text-xs flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
+          <Sparkles size={16} className="text-[#2d7738] shrink-0" />
+          <div>
+            <p className="font-semibold text-[#2d7738]">Update v{downloadedUpdate.version} ready!</p>
+            <p className="text-[10px] text-[#787774]">Restart the app to apply the latest version.</p>
+          </div>
+          <button
+            onClick={() => window.electronAPI?.installUpdate?.()}
+            className="px-2.5 py-1 text-[11px] rounded bg-[#2d7738] text-white font-semibold hover:bg-[#235c2b] transition-colors shadow-2xs whitespace-nowrap"
+          >
+            Restart & Apply
+          </button>
         </div>
       )}
 

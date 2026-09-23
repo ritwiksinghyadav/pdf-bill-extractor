@@ -81,7 +81,7 @@ export default function CampaignsView({
 
   // Editable dummy test data for previews and live testing
   const [dummyData, setDummyData] = useState({
-    customerName: 'Ritwik Singh',
+    customerName: 'Ishan Ahuja',
     billNo: 'HR/202509095',
     amount: '2,520',
     date: '23/09/2026',
@@ -592,7 +592,7 @@ export default function CampaignsView({
                       type="button"
                       onClick={() =>
                         setDummyData({
-                          customerName: 'Ritwik Singh',
+                          customerName: 'Ishan Ahuja',
                           billNo: 'HR/202509095',
                           amount: '2,520',
                           date: '23/09/2026',

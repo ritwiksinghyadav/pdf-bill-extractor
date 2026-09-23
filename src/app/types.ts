@@ -75,6 +75,10 @@ declare global {
       testAiSensyKey: (p: { apiKey: string }) => Promise<{ success: boolean; message?: string; error?: string }>;
       getTodayLogs: () => Promise<{ success: boolean; date: string; content: string; path: string; error?: string }>;
       openLogsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
+      onUpdateAvailable?: (cb: (info: any) => void) => void;
+      onUpdateDownloaded?: (cb: (info: any) => void) => void;
+      installUpdate?: () => Promise<void>;
+      checkForUpdates?: () => Promise<{ success: boolean; info?: any; error?: string; message?: string }>;
     };
   }
 }

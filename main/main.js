@@ -57,9 +57,51 @@ function createWindow() {
   mainWindow.loadURL(startUrl);
 }
 
+// ─── Auto-Updater Configuration (GitHub Releases) ──────────────────────────
+const { autoUpdater } = require('electron-updater');
+
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
+
+autoUpdater.on('checking-for-update', () => {
+  writeDailyLog('INFO', 'Updater', 'Checking for updates on GitHub Releases...');
+});
+
+autoUpdater.on('update-available', (info) => {
+  writeDailyLog('INFO', 'Updater', `New version available: v${info.version}`);
+  if (mainWindow?.webContents) {
+    mainWindow.webContents.send('updater:available', info);
+  }
+});
+
+autoUpdater.on('update-not-available', () => {
+  writeDailyLog('INFO', 'Updater', `App is up-to-date (v${app.getVersion()})`);
+});
+
+autoUpdater.on('error', (err) => {
+  writeDailyLog('WARN', 'Updater', `Update notice: ${err.message}`);
+});
+
+autoUpdater.on('update-downloaded', (info) => {
+  writeDailyLog('SUCCESS', 'Updater', `Update v${info.version} downloaded in background. Ready to install.`);
+  if (mainWindow?.webContents) {
+    mainWindow.webContents.send('updater:downloaded', info);
+  }
+});
+
 app.whenReady().then(() => {
   createWindow();
-  writeDailyLog('INFO', 'System', 'PDF Bill Extractor application started');
+  writeDailyLog('INFO', 'System', `PDF Bill Extractor v${app.getVersion()} started`);
+
+  // Check for updates after 3 seconds in production build
+  if (app.isPackaged) {
+    setTimeout(() => {
+      autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+        writeDailyLog('WARN', 'Updater', `Update check failed: ${err.message}`);
+      });
+    }, 3000);
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -68,6 +110,22 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   writeDailyLog('INFO', 'System', 'Application closing');
   if (process.platform !== 'darwin') app.quit();
+});
+
+ipcMain.handle('updater:installNow', () => {
+  autoUpdater.quitAndInstall();
+});
+
+ipcMain.handle('updater:checkForUpdates', async () => {
+  if (!app.isPackaged) {
+    return { success: false, message: 'Update checks are only active in production packaged app.' };
+  }
+  try {
+    const res = await autoUpdater.checkForUpdates();
+    return { success: true, info: res?.updateInfo };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
 // ─── IPC: Open Folder Dialog ────────────────────────────────────────────────

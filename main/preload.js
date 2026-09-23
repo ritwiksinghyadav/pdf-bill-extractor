@@ -21,6 +21,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Daily Logging
   getTodayLogs:      ()          => ipcRenderer.invoke('logs:getToday'),
   openLogsFolder:    ()          => ipcRenderer.invoke('logs:openFolder'),
+
+  // Auto-Updater
+  onUpdateAvailable:  (cb)       => ipcRenderer.on('updater:available', (_, info) => cb(info)),
+  onUpdateDownloaded: (cb)       => ipcRenderer.on('updater:downloaded', (_, info) => cb(info)),
+  installUpdate:      ()         => ipcRenderer.invoke('updater:installNow'),
+  checkForUpdates:    ()         => ipcRenderer.invoke('updater:checkForUpdates'),
 });
 
 
