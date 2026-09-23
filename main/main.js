@@ -1,9 +1,23 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const pdfParse = require('pdf-parse');
 
 let mainWindow;
+
+// Register privileged custom scheme 'app' for serving static Next.js assets cleanly in packaged/prod mode
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
 
 // ─── Daily Activity Logger ─────────────────────────────────────────────────
 function getLogsDir() {
@@ -32,13 +46,16 @@ function writeDailyLog(level, category, message, details = null) {
 }
 
 function createWindow() {
+  const isProd = app.isPackaged || process.env.NODE_ENV === 'production';
+
   mainWindow = new BrowserWindow({
     width: 1350,
     height: 880,
     minWidth: 1000,
     minHeight: 650,
     title: 'PDF Bill Extractor',
-    backgroundColor: '#ffffff',
+    backgroundColor: '#f7f6f3',
+    show: false,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -49,11 +66,57 @@ function createWindow() {
 
   mainWindow.setMenu(null);
 
-  // In dev mode load Next.js dev server, in production load built files
-  const startUrl = process.env.NODE_ENV === 'production'
-    ? `file://${path.join(__dirname, '../out/index.html')}`
+  // Show window smoothly when DOM is ready to paint
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
+
+  // Safety fallback in case ready-to-show is delayed
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+  }, 2500);
+
+  // Failure listener: show informative loading & diagnostic screen if anything fails to load
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    writeDailyLog('ERROR', 'Window', `Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+
+    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>PDF Bill Extractor</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #f7f6f3; color: #37352f; }
+            .card { background: white; padding: 36px 40px; border-radius: 12px; border: 1px solid #e9e9e7; box-shadow: 0 4px 16px rgba(0,0,0,0.05); text-align: center; max-width: 440px; }
+            .spinner { width: 36px; height: 36px; border: 3px solid #e9e9e7; border-top-color: #2383e2; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
+            @keyframes spin { to { transform: rotate(360deg); } }
+            h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; color: #37352f; }
+            p { margin: 0 0 18px; font-size: 13px; color: #787774; line-height: 1.5; }
+            .error-code { font-family: monospace; font-size: 11px; background: #fdf2f2; color: #eb5757; padding: 4px 8px; border-radius: 4px; display: inline-block; margin-bottom: 16px; }
+            button { background: #2383e2; color: white; border: none; padding: 8px 18px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; }
+            button:hover { background: #1a6bbf; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="spinner"></div>
+            <h2>Unable to Connect</h2>
+            <p>Could not load the application interface.<br/><span class="error-code">${errorDescription} (${errorCode})</span></p>
+            <button onclick="window.location.reload()">Retry Loading</button>
+          </div>
+        </body>
+      </html>
+    `)}`);
+  });
+
+  const startUrl = isProd
+    ? 'app://bundle/index.html'
     : 'http://localhost:3000';
 
+  writeDailyLog('INFO', 'Window', `Loading URL: ${startUrl} (isPackaged: ${app.isPackaged})`);
   mainWindow.loadURL(startUrl);
 }
 
@@ -90,8 +153,65 @@ autoUpdater.on('update-downloaded', (info) => {
 });
 
 app.whenReady().then(() => {
+  const mimeTypes = {
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.woff2': 'font/woff2',
+    '.woff': 'font/woff',
+    '.ttf': 'font/ttf',
+    '.txt': 'text/plain',
+  };
+
+  protocol.handle('app', (request) => {
+    try {
+      const parsedUrl = new URL(request.url);
+      let pathname = decodeURIComponent(parsedUrl.pathname);
+      if (!pathname || pathname === '/') {
+        pathname = '/index.html';
+      }
+      const cleanPath = pathname.replace(/^\/+/, '');
+      let targetPath = path.join(__dirname, '../out', cleanPath);
+
+      if (fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory()) {
+        targetPath = path.join(targetPath, 'index.html');
+      } else if (!fs.existsSync(targetPath)) {
+        if (fs.existsSync(targetPath + '.html')) {
+          targetPath = targetPath + '.html';
+        } else {
+          targetPath = path.join(__dirname, '../out/index.html');
+        }
+      }
+
+      if (!fs.existsSync(targetPath)) {
+        writeDailyLog('WARN', 'Protocol', `Not found: ${cleanPath} -> ${targetPath}`);
+        return new Response('File Not Found', { status: 404 });
+      }
+
+      const ext = path.extname(targetPath).toLowerCase();
+      const contentType = mimeTypes[ext] || 'application/octet-stream';
+      const fileBuffer = fs.readFileSync(targetPath);
+
+      return new Response(fileBuffer, {
+        status: 200,
+        headers: {
+          'Content-Type': contentType,
+        },
+      });
+    } catch (err) {
+      writeDailyLog('ERROR', 'Protocol', `Error handling ${request.url}: ${err.message}`);
+      return new Response('Internal error: ' + err.message, { status: 500 });
+    }
+  });
+
   createWindow();
-  writeDailyLog('INFO', 'System', `PDF Bill Extractor v${app.getVersion()} started`);
+  writeDailyLog('INFO', 'System', `PDF Bill Extractor v${app.getVersion()} started (Mode: ${app.isPackaged ? 'Production' : 'Development'})`);
 
   // Check for updates after 3 seconds in production build
   if (app.isPackaged) {
