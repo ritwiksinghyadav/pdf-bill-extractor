@@ -337,24 +337,118 @@ export default function Home() {
 
   const handleProceedWhatsAppBroadcast = async () => {
     setShowWhatsAppConfirm(false);
+
+    if (!window.electronAPI) {
+      showToast('Please launch inside the Electron desktop app.');
+      return;
+    }
+
     if (!settings.aisensyApiKey?.trim()) {
       showToast('AiSensy API Key is missing. Please configure it in API & Credentials.');
       setActiveTab('settings');
       return;
     }
 
-    // Step A: Ensure ready bills are uploaded
-    await handleRunUpload();
+    const campaignName = activeCampaign?.templateName?.trim() || settings.aisensyCampaignName?.trim();
+    if (!campaignName) {
+      showToast('AiSensy Campaign Name is missing. Please configure it in API & Credentials or Campaigns.');
+      setActiveTab('settings');
+      return;
+    }
 
-    // Step B: Send WhatsApp with custom template parameter evaluation
-    setIsSendingWhatsApp(true);
-    const validRows = Object.values(rows).filter(
-      (r) => r.extractStatus === 'OK' && r.publicUrl
+    // Identify all extracted rows with a valid phone number (at least 10 digits)
+    const allValidRows = Object.values(rows).filter(
+      (r) => r.extractStatus === 'OK' && r.customerNumber && r.customerNumber.replace(/\D/g, '').length >= 10
     );
-    setWhatsAppProgress({ current: 0, total: validRows.length });
 
-    let sentCount = 0;
-    for (const row of validRows) {
+    if (allValidRows.length === 0) {
+      showToast('No bills with valid 10-digit phone numbers are ready to send.', 'error');
+      return;
+    }
+
+    // Prioritize unsent bills. If all are already sent, allow re-broadcasting all valid rows.
+    const unsentRows = allValidRows.filter((r) => r.whatsAppStatus !== 'Sent');
+    const targetRows = unsentRows.length > 0 ? unsentRows : allValidRows;
+
+    // Check if any target bills still need to be uploaded to the cloud
+    const needsUpload = targetRows.some((r) => !r.publicUrl);
+    if (needsUpload && !settings.uploadthingToken?.trim()) {
+      showToast('UploadThing Token is missing. Please configure it in API & Credentials to upload bills.');
+      setActiveTab('settings');
+      return;
+    }
+
+    setIsSendingWhatsApp(true);
+    setWhatsAppProgress({ current: 0, total: targetRows.length });
+
+    let successCount = 0;
+    let failCount = 0;
+    const updatedHistoryRecords = { ...cacheHistory.records };
+
+    for (let i = 0; i < targetRows.length; i++) {
+      const row = targetRows[i];
+      setWhatsAppProgress({ current: i + 1, total: targetRows.length });
+
+      let currentPublicUrl = row.publicUrl;
+
+      // ── Step 1: Upload to UploadThing if not already uploaded ──
+      if (!currentPublicUrl) {
+        setRows((prev) => ({
+          ...prev,
+          [row.path]: {
+            ...prev[row.path],
+            uploadStatus: 'Uploading',
+            whatsAppStatus: 'Sending',
+            uploadError: undefined,
+            whatsAppError: undefined,
+          },
+        }));
+
+        const upRes = await window.electronAPI.uploadthingUpload({
+          filePath: row.path,
+          uploadthingToken: settings.uploadthingToken,
+        });
+
+        if (upRes.success && upRes.publicUrl) {
+          currentPublicUrl = upRes.publicUrl;
+          const file = pdfFiles.find((f) => f.path === row.path);
+          const newRecord: CacheEntry = {
+            path: row.path,
+            pdfName: row.pdfName,
+            customerName: row.customerName,
+            billNo: row.billNo,
+            amount: row.amount,
+            publicUrl: upRes.publicUrl,
+            uploadedAt: new Date().toISOString(),
+            size: file?.size || 0,
+          };
+          updatedHistoryRecords[row.path] = newRecord;
+
+          setRows((prev) => ({
+            ...prev,
+            [row.path]: {
+              ...prev[row.path],
+              uploadStatus: 'Uploaded',
+              publicUrl: upRes.publicUrl,
+            },
+          }));
+        } else {
+          failCount++;
+          setRows((prev) => ({
+            ...prev,
+            [row.path]: {
+              ...prev[row.path],
+              uploadStatus: 'Error',
+              uploadError: upRes.error || 'Upload failed',
+              whatsAppStatus: 'Error',
+              whatsAppError: 'Upload failed — cannot send without PDF URL',
+            },
+          }));
+          continue; // Skip sending this row
+        }
+      }
+
+      // ── Step 2: Dispatch WhatsApp message via AiSensy ──
       setRows((prev) => ({
         ...prev,
         [row.path]: { ...prev[row.path], whatsAppStatus: 'Sending' },
@@ -367,40 +461,72 @@ export default function Home() {
           .replace(/{{BillNo}}/g, row.billNo || 'N/A')
           .replace(/{{Amount}}/g, cleanAmount(row.amount || '0'))
           .replace(/{{Date}}/g, row.date || 'N/A')
-          .replace(/{{PublicUrl}}/g, row.publicUrl || '');
+          .replace(/{{PublicUrl}}/g, currentPublicUrl || '');
       });
 
-      const res = await window.electronAPI!.aisensySend({
+      const mediaFilename = `${(row.customerName || 'Bill').replace(/[^a-zA-Z0-9 ]/g, '').trim()}-${(row.billNo || 'Invoice').replace(/[^a-zA-Z0-9\/\-]/g, '').trim()}`;
+
+      const res = await window.electronAPI.aisensySend({
         apiKey: settings.aisensyApiKey,
-        campaignName: activeCampaign.templateName || settings.aisensyCampaignName,
+        campaignName: campaignName,
         destination: row.customerNumber,
         customerName: row.customerName,
         billNo: row.billNo,
         amount: row.amount,
-        pdfUrl: row.publicUrl,
+        pdfUrl: currentPublicUrl,
         countryCode: settings.countryCode,
         templateParams: evaluatedParams,
-        mediaFilename: `${(row.customerName || 'Bill').replace(/[^a-zA-Z0-9 ]/g, '').trim()}-${(row.billNo || 'Invoice').replace(/[^a-zA-Z0-9\/\-]/g, '').trim()}`,
+        mediaFilename,
       });
 
-      sentCount++;
-      setWhatsAppProgress({ current: sentCount, total: validRows.length });
+      if (res.success) {
+        successCount++;
+        setRows((prev) => ({
+          ...prev,
+          [row.path]: {
+            ...prev[row.path],
+            whatsAppStatus: 'Sent',
+            whatsAppError: undefined,
+          },
+        }));
+      } else {
+        failCount++;
+        setRows((prev) => ({
+          ...prev,
+          [row.path]: {
+            ...prev[row.path],
+            whatsAppStatus: 'Error',
+            whatsAppError: res.error || 'Delivery failed',
+          },
+        }));
+      }
 
-      setRows((prev) => ({
-        ...prev,
-        [row.path]: {
-          ...prev[row.path],
-          whatsAppStatus: res.success ? 'Sent' : 'Error',
-          whatsAppError: res.success ? undefined : (res.error || 'Delivery failed'),
-        },
-      }));
+      // Rate pacing: 500ms between requests to avoid AiSensy rate throttling
+      if (i < targetRows.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
 
-      // Rate pacing
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    // Save updated upload cache to disk if new uploads were completed
+    if (Object.keys(updatedHistoryRecords).length > Object.keys(cacheHistory.records).length) {
+      const newHistory: StorageHistory = {
+        lastProcessedPath: folderPath,
+        records: updatedHistoryRecords,
+      };
+      setCacheHistory(newHistory);
+      await window.electronAPI.saveHistory(newHistory);
     }
 
     setIsSendingWhatsApp(false);
     setWhatsAppProgress(null);
+
+    if (successCount > 0 && failCount === 0) {
+      showToast(`Delivered all ${successCount} bill(s) via WhatsApp!`, 'success');
+    } else if (successCount > 0 && failCount > 0) {
+      showToast(`Sent ${successCount} bill(s), but ${failCount} failed. Check row status for details.`, 'error');
+    } else if (failCount > 0) {
+      showToast(`Failed to send ${failCount} bill(s). Check API & Credentials or Daily Logs.`, 'error');
+    }
   };
 
   // ─── Single Row: Send WhatsApp (individual per-row button) ─────────────────
@@ -857,8 +983,14 @@ export default function Home() {
 
                       {/* Button: Upload & Send WhatsApp */}
                       <button
-                        onClick={() => setShowWhatsAppConfirm(true)}
-                        disabled={isUploading || isSendingWhatsApp}
+                        onClick={() => {
+                          if (extractedOkCount === 0) {
+                            showToast('No bills with valid phone numbers to send. Please edit the phone number in the table.', 'error');
+                            return;
+                          }
+                          setShowWhatsAppConfirm(true);
+                        }}
+                        disabled={isUploading || isSendingWhatsApp || extractedOkCount === 0}
                         className="flex items-center gap-1.5 px-3.5 py-1 rounded-md text-xs font-semibold text-white bg-[#2d7738] hover:bg-[#235c2b] transition-all shadow-xs active:scale-[0.98] disabled:opacity-40"
                       >
                         {isSendingWhatsApp ? (
@@ -1317,7 +1449,8 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={handleProceedWhatsAppBroadcast}
-                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-[#2d7738] hover:bg-[#235c2b] rounded-md shadow-xs transition-all active:scale-[0.98]"
+                  disabled={extractedOkCount === 0 || isSendingWhatsApp}
+                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-[#2d7738] hover:bg-[#235c2b] rounded-md shadow-xs transition-all active:scale-[0.98] disabled:opacity-40"
                 >
                   <Send size={12} /> Confirm & Dispatch
                 </button>
